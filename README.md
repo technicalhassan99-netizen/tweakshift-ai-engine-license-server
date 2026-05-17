@@ -25,6 +25,58 @@ https://tweakshift-ai-engine-license-server.onrender.com/api/license/verify
 
 ```txt
 GUMROAD_PRODUCT_ID=your_gumroad_product_id_or_permalink
+<<<<<<< HEAD
+=======
+```
+
+The server verifies Gumroad keys through:
+
+```txt
+https://api.gumroad.com/v2/licenses/verify
+```
+
+It checks refunded, disputed, cancelled, failed/unpaid, and ended memberships.
+
+### Freemius existing users
+
+Keep these variables configured so existing Freemius customers keep working:
+
+```txt
+FREEMIUS_API_BASE=https://api.freemius.com/v1
+FREEMIUS_PRODUCT_ID=your_freemius_product_id
+FREEMIUS_PUBLIC_KEY=your_public_key
+FREEMIUS_SECRET_KEY=your_secret_key
+```
+
+The current Freemius flow uses the product license activation endpoint.
+
+## App-side protection
+
+The desktop app verifies the saved license every time the app opens.
+
+If Render is sleeping or verification times out:
+
+- The app keeps the user’s last verified Premium state temporarily.
+- First retry happens after 30 seconds.
+- Second retry happens after 2 minutes.
+- Premium stays available for up to 72 hours after the last successful verification.
+- After 7 days without successful verification, Premium locks until the server verifies again.
+
+This avoids interrupting real paying users while Render wakes up, but still removes access for expired/refunded/cancelled users when verification succeeds.
+
+
+## Gumroad license key format
+
+Gumroad may display license keys with dashes, for example `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`. The server now tries both the exact dashed key and the compact key when verifying with Gumroad, while keeping Freemius keys unchanged for existing users.
+
+
+## Patch marker
+
+Render logs should show:
+
+```txt
+License server patch: Gumroad raw+dashed verification enabled v3
+>>>>>>> c0459be (Fix Gumroad raw and dashed license verification)
 ```
 
 The server verifies Gumroad keys through:
