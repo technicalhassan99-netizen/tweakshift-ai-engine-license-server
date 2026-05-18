@@ -8,13 +8,32 @@ const FREEMIUS_API_BASE = process.env.FREEMIUS_API_BASE || 'https://api.freemius
 const FREEMIUS_PRODUCT_ID = process.env.FREEMIUS_PRODUCT_ID || ''
 
 const GUMROAD_API_BASE = process.env.GUMROAD_API_BASE || 'https://api.gumroad.com/v2'
+
+// Monthly / yearly product
 const GUMROAD_PRODUCT_ID = process.env.GUMROAD_PRODUCT_ID || process.env.GUMROAD_PRODUCT_PERMALINK || ''
+
+// Lifetime one-time product
+const GUMROAD_LIFETIME_PRODUCT_ID = process.env.GUMROAD_LIFETIME_PRODUCT_ID || ''
 
 app.use(cors({ origin: '*', methods: ['GET', 'POST'] }))
 app.use(express.json({ limit: '64kb' }))
 
 function clean(value) {
   return String(value || '').trim()
+}
+
+function getGumroadProductIds() {
+  const ids = [
+    { id: clean(GUMROAD_PRODUCT_ID), type: 'membership' },
+    { id: clean(GUMROAD_LIFETIME_PRODUCT_ID), type: 'lifetime' },
+  ].filter(item => item.id)
+
+  const unique = []
+  for (const item of ids) {
+    if (!unique.some(x => x.id === item.id)) unique.push(item)
+  }
+
+  return unique
 }
 
 function normalizeGumroadLicenseKey(value) {
@@ -89,7 +108,6 @@ function makeInactive(status, message, provider, extra = {}) {
 
 function normalizeFreemiusActivation(payload, licenseKey, email, uid) {
   const license = payload.license || payload.data || payload
-
   const status = String(license.status || payload.status || '').toLowerCase()
 
   const isCancelled =
@@ -173,7 +191,7 @@ async function verifyFreemius({ licenseKey, email, machineId }) {
   return normalized
 }
 
-function normalizeGumroadResponse(payload, licenseKey, email) {
+function normalizeGumroadResponse(payload, licenseKey, email, productInfo) {
   const purchase = payload.purchase || {}
   const status = String(purchase.subscription_status || purchase.status || '').toLowerCase()
 
@@ -195,29 +213,37 @@ function normalizeGumroadResponse(payload, licenseKey, email) {
   const ended = endedAt ? new Date(endedAt).getTime() < Date.now() : false
 
   if (refunded) {
-    return makeInactive('refunded', 'This Gumroad purchase was refunded.', 'gumroad', { refunded: true })
-  }
-
-  if (disputed) {
-    return makeInactive('disputed', 'This Gumroad purchase is disputed.', 'gumroad', { disputed: true })
-  }
-
-  if (failed) {
-    return makeInactive(status, 'This Gumroad membership payment is not active.', 'gumroad')
-  }
-
-  if (ended) {
-    return makeInactive('expired', 'This Gumroad membership has ended.', 'gumroad', {
-      expiresAt: parseExpiry(endedAt),
+    return makeInactive('refunded', 'This Gumroad purchase was refunded.', 'gumroad', {
+      refunded: true,
+      gumroadProductType: productInfo.type,
     })
   }
 
-  const expiresAt = parseExpiry(
-    endedAt ||
-    purchase.subscription_ended_at ||
-    purchase.recurrence_end_date ||
-    null
-  )
+  if (disputed) {
+    return makeInactive('disputed', 'This Gumroad purchase is disputed.', 'gumroad', {
+      disputed: true,
+      gumroadProductType: productInfo.type,
+    })
+  }
+
+  if (failed) {
+    return makeInactive(status, 'This Gumroad membership payment is not active.', 'gumroad', {
+      gumroadProductType: productInfo.type,
+    })
+  }
+
+  // Lifetime product has no subscription ending logic unless refunded/disputed.
+  if (productInfo.type !== 'lifetime' && ended) {
+    return makeInactive('expired', 'This Gumroad membership has ended.', 'gumroad', {
+      expiresAt: parseExpiry(endedAt),
+      gumroadProductType: productInfo.type,
+    })
+  }
+
+  const expiresAt =
+    productInfo.type === 'lifetime'
+      ? null
+      : parseExpiry(endedAt || purchase.subscription_ended_at || purchase.recurrence_end_date || null)
 
   return {
     valid: payload.success === true,
@@ -225,22 +251,31 @@ function normalizeGumroadResponse(payload, licenseKey, email) {
     success: payload.success === true,
     licenseKey,
     provider: 'gumroad',
-    plan: purchase.variants || purchase.variant || purchase.product_name || purchase.product_permalink || 'Premium',
+    plan:
+      productInfo.type === 'lifetime'
+        ? 'Lifetime'
+        : purchase.variants || purchase.variant || purchase.product_name || purchase.product_permalink || 'Premium',
     customerEmail: purchase.email || email || '',
     expiresAt,
-    subscriptionStatus: cancelled ? 'cancelled_pending_end' : status || 'active',
-    cancelled: Boolean(cancelled),
+    subscriptionStatus:
+      productInfo.type === 'lifetime'
+        ? 'lifetime'
+        : cancelled
+          ? 'cancelled_pending_end'
+          : status || 'active',
+    cancelled: productInfo.type === 'lifetime' ? false : Boolean(cancelled),
     source: 'gumroad-license-api',
     rawStatus: status || null,
     uses: payload.uses || null,
     purchaseId: purchase.id || purchase.sale_id || null,
-    productId: purchase.product_id || GUMROAD_PRODUCT_ID || null,
+    productId: productInfo.id,
+    gumroadProductType: productInfo.type,
   }
 }
 
-async function verifyGumroadCandidate(candidate, email) {
+async function verifyGumroadCandidate(candidate, productInfo) {
   const body = new URLSearchParams()
-  body.set('product_id', GUMROAD_PRODUCT_ID)
+  body.set('product_id', productInfo.id)
   body.set('license_key', candidate)
   body.set('increment_uses_count', 'false')
 
@@ -256,7 +291,9 @@ async function verifyGumroadCandidate(candidate, email) {
 }
 
 async function verifyGumroad({ licenseKey, displayLicenseKey, email }) {
-  if (!GUMROAD_PRODUCT_ID) {
+  const productIds = getGumroadProductIds()
+
+  if (!productIds.length) {
     return { configured: false, error: 'Gumroad is not configured.' }
   }
 
@@ -276,47 +313,53 @@ async function verifyGumroad({ licenseKey, displayLicenseKey, email }) {
 
   const errors = []
 
-  for (const candidate of candidates) {
-    try {
-      const { response, payload } = await verifyGumroadCandidate(candidate, email)
+  for (const productInfo of productIds) {
+    for (const candidate of candidates) {
+      try {
+        const { response, payload } = await verifyGumroadCandidate(candidate, productInfo)
 
-      if (response.ok && payload.success === true) {
-        const normalized = normalizeGumroadResponse(payload, originalKey || candidate, email)
+        if (response.ok && payload.success === true) {
+          const normalized = normalizeGumroadResponse(payload, originalKey || candidate, email, productInfo)
 
-        if (!normalized.valid) return normalized
+          if (!normalized.valid) return normalized
 
-        return {
-          ...normalized,
-          licenseKey: originalKey || candidate,
-          gumroadMatchedKeyFormat: candidate.includes('-') ? 'dashed' : 'compact',
+          return {
+            ...normalized,
+            licenseKey: originalKey || candidate,
+            gumroadMatchedKeyFormat: candidate.includes('-') ? 'dashed' : 'compact',
+          }
         }
-      }
 
-      const apiError = getErrorMessage(payload, `Gumroad returned ${response.status}`)
+        const apiError = getErrorMessage(payload, `Gumroad returned ${response.status}`)
 
-      errors.push({
-        keyLength: candidate.length,
-        keyFormat: candidate.includes('-') ? 'dashed' : 'compact',
-        statusCode: response.status,
-        error: apiError,
-      })
+        errors.push({
+          productType: productInfo.type,
+          productIdTail: productInfo.id.slice(-6),
+          keyLength: candidate.length,
+          keyFormat: candidate.includes('-') ? 'dashed' : 'compact',
+          statusCode: response.status,
+          error: apiError,
+        })
 
-      if (payload.purchase) {
-        const inactive = normalizeGumroadResponse(payload, originalKey || candidate, email)
+        if (payload.purchase) {
+          const inactive = normalizeGumroadResponse(payload, originalKey || candidate, email, productInfo)
 
-        if (
-          inactive.final ||
-          ['refunded', 'disputed', 'expired'].includes(String(inactive.status || '').toLowerCase())
-        ) {
-          return inactive
+          if (
+            inactive.final ||
+            ['refunded', 'disputed', 'expired'].includes(String(inactive.status || '').toLowerCase())
+          ) {
+            return inactive
+          }
         }
+      } catch (err) {
+        errors.push({
+          productType: productInfo.type,
+          productIdTail: productInfo.id.slice(-6),
+          keyLength: candidate.length,
+          keyFormat: candidate.includes('-') ? 'dashed' : 'compact',
+          error: err.message,
+        })
       }
-    } catch (err) {
-      errors.push({
-        keyLength: candidate.length,
-        keyFormat: candidate.includes('-') ? 'dashed' : 'compact',
-        error: err.message,
-      })
     }
   }
 
@@ -330,7 +373,7 @@ async function verifyGumroad({ licenseKey, displayLicenseKey, email }) {
     status: 'invalid',
     error: firstError.includes('limited to 32 characters')
       ? 'Gumroad rejected this license format. Please copy the full key exactly from the Gumroad receipt or library.'
-      : firstError,
+      : 'License key was not found or is not active.',
     gumroadAttempts: errors,
   }
 }
@@ -348,7 +391,9 @@ app.get('/health', (_req, res) => {
     ok: true,
     service: 'tweakshift-license-server',
     providers: {
-      gumroadConfigured: Boolean(GUMROAD_PRODUCT_ID),
+      gumroadConfigured: getGumroadProductIds().length > 0,
+      gumroadMembershipConfigured: Boolean(GUMROAD_PRODUCT_ID),
+      gumroadLifetimeConfigured: Boolean(GUMROAD_LIFETIME_PRODUCT_ID),
       freemiusConfigured: Boolean(FREEMIUS_PRODUCT_ID),
     },
   })
@@ -381,13 +426,13 @@ app.post('/api/license/verify', async (req, res) => {
       hasDashes: licenseKey.includes('-') || displayLicenseKey.includes('-'),
       gumroadCandidateLengths: gumroadCandidates.map((key) => key.length),
       gumroadLike,
-      gumroadConfigured: Boolean(GUMROAD_PRODUCT_ID),
+      gumroadProductsConfigured: getGumroadProductIds().map(item => item.type),
       freemiusConfigured: Boolean(FREEMIUS_PRODUCT_ID),
     })
 
     const attempts = []
 
-    if (GUMROAD_PRODUCT_ID) {
+    if (getGumroadProductIds().length > 0) {
       const gumroad = await verifyGumroad({
         licenseKey,
         displayLicenseKey,
@@ -402,6 +447,7 @@ app.post('/api/license/verify', async (req, res) => {
         provider: 'gumroad',
         status: gumroad.status || (gumroad.valid ? 'active' : 'invalid'),
         error: gumroad.error,
+        productType: gumroad.gumroadProductType,
         details: gumroad.gumroadAttempts,
       })
 
@@ -450,7 +496,7 @@ app.post('/api/license/verify', async (req, res) => {
       })
     }
 
-    if (!GUMROAD_PRODUCT_ID && !FREEMIUS_PRODUCT_ID) {
+    if (getGumroadProductIds().length === 0 && !FREEMIUS_PRODUCT_ID) {
       return res.status(500).json({
         valid: false,
         active: false,
@@ -481,5 +527,5 @@ app.post('/api/license/verify', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`TweakShift license server running on port ${PORT}`)
-  console.log('License server patch: Gumroad raw+dashed verification enabled v3')
+  console.log('License server patch: Gumroad membership+lifetime verification enabled v4')
 })
