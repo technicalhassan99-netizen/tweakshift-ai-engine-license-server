@@ -106,89 +106,215 @@ function makeInactive(status, message, provider, extra = {}) {
   }
 }
 
-function normalizeFreemiusActivation(payload, licenseKey, email, uid) {
-  const license = payload.license || payload.data || payload
-  const status = String(license.status || payload.status || '').toLowerCase()
+function getByPath(obj, paths) {
+  for (const pathKeys of paths) {
+    let cur = obj
+    let ok = true
+    for (const key of pathKeys) {
+      if (cur && Object.prototype.hasOwnProperty.call(cur, key)) cur = cur[key]
+      else { ok = false; break }
+    }
+    if (ok && cur !== undefined && cur !== null && cur !== '') return cur
+  }
+  return null
+}
 
-  const isCancelled =
-    license.is_cancelled === true ||
-    license.cancelled === true ||
-    status === 'cancelled' ||
-    status === 'canceled'
+function findDeepValue(obj, wantedKeys) {
+  const seen = new Set()
+  const stack = [obj]
+  while (stack.length) {
+    const cur = stack.pop()
+    if (!cur || typeof cur !== 'object' || seen.has(cur)) continue
+    seen.add(cur)
+    for (const [key, value] of Object.entries(cur)) {
+      if (wantedKeys.includes(key) && value !== undefined && value !== null && value !== '') return value
+      if (value && typeof value === 'object') stack.push(value)
+    }
+  }
+  return null
+}
 
-  const expiration = license.expiration || license.expires_at || null
-  const expiresAt = parseExpiry(expiration)
-  const isExpired = expiresAt ? new Date(expiresAt).getTime() < Date.now() : false
+function normalizeStatus(value) {
+  return String(value || '').trim().toLowerCase()
+}
 
-  const isActive =
-    !isCancelled &&
-    !isExpired &&
-    (
-      license.is_active === true ||
-      license.active === true ||
-      status === 'active' ||
-      Boolean(payload.install_id || license.install_id)
-    )
+function freemiusStatusIsInactive(status) {
+  return ['expired', 'cancelled', 'canceled', 'inactive', 'disabled', 'deactivated', 'refunded', 'invalid', 'not_found'].includes(normalizeStatus(status))
+}
+
+function freemiusDateIsExpired(value) {
+  if (!value) return false
+  const t = new Date(value).getTime()
+  if (!Number.isFinite(t)) return false
+  return Date.now() > t
+}
+
+function normalizeFreemiusPayload(payload, licenseKey, email, uid, options = {}) {
+  const allowTopLevelIdAsInstallId = options.allowTopLevelIdAsInstallId === true
+  const installId =
+    getByPath(payload, [['install', 'id'], ['install_id']]) ||
+    findDeepValue(payload, ['install_id']) ||
+    (allowTopLevelIdAsInstallId ? getByPath(payload, [['id']]) : null)
+
+  const licenseId =
+    getByPath(payload, [['license', 'id'], ['license_id']]) ||
+    findDeepValue(payload, ['license_id']) ||
+    (!allowTopLevelIdAsInstallId ? getByPath(payload, [['id']]) : null)
+
+  const rawStatus = normalizeStatus(
+    getByPath(payload, [['license', 'status'], ['subscription', 'status'], ['subscription_status'], ['status']]) ||
+    findDeepValue(payload, ['subscription_status', 'status'])
+  )
+
+  const expiration =
+    getByPath(payload, [['license', 'expiration'], ['license', 'expires'], ['license', 'expires_at'], ['expiration'], ['expires_at']]) ||
+    findDeepValue(payload, ['expiration', 'expires', 'expires_at', 'expiration_date'])
+
+  const cancelledFlag = payload.is_cancelled === true || findDeepValue(payload, ['is_cancelled', 'isCanceled']) === true
+  const refundedFlag = payload.is_refunded === true || findDeepValue(payload, ['is_refunded', 'isRefunded']) === true
+  const inactiveFlag = payload.is_active === false || payload.active === false || findDeepValue(payload, ['is_active', 'active']) === false
+  const expiredFlag = payload.expired === true || payload.is_expired === true || findDeepValue(payload, ['expired', 'is_expired']) === true
+  const dateExpired = freemiusDateIsExpired(expiration)
+
+  const inactive = cancelledFlag || refundedFlag || inactiveFlag || expiredFlag || dateExpired || freemiusStatusIsInactive(rawStatus)
+  const status = inactive
+    ? (cancelledFlag ? 'cancelled' : refundedFlag ? 'refunded' : inactiveFlag ? 'inactive' : dateExpired || expiredFlag ? 'expired' : rawStatus || 'inactive')
+    : (rawStatus || 'active')
 
   return {
-    valid: Boolean(isActive),
-    active: Boolean(isActive),
-    success: Boolean(isActive),
+    valid: !inactive,
+    active: !inactive,
+    success: !inactive,
+    final: true,
     licenseKey,
     provider: 'freemius',
-    plan: license.plan_name || license.plan || payload.plan || 'Premium',
-    customerEmail: license.customer_email || license.email || payload.email || email || '',
-    expiresAt,
-    installId: payload.install_id || license.install_id || null,
-    installApiToken: payload.install_api_token || license.install_api_token || null,
+    plan: !inactive ? (getByPath(payload, [['plan', 'title'], ['plan', 'name'], ['license', 'plan_title'], ['license', 'plan_name']]) || 'Premium') : 'Locked',
+    customerEmail: getByPath(payload, [['user', 'email'], ['customer', 'email'], ['license', 'email'], ['email']]) || email || '',
+    expiresAt: parseExpiry(expiration),
+    installId: installId || options.previousInstallId || null,
+    licenseId: licenseId || options.previousLicenseId || null,
     uid,
-    source: 'freemius-activation-api',
-    rawStatus: license.status || payload.status || null,
-    status: isActive ? 'active' : isCancelled ? 'cancelled' : isExpired ? 'expired' : status || 'inactive',
+    source: 'freemius',
+    rawStatus,
+    status,
+    subscriptionStatus: status,
+    error: inactive ? 'Freemius license is inactive, expired, cancelled, refunded, or deactivated.' : undefined,
   }
 }
 
-async function verifyFreemius({ licenseKey, email, machineId }) {
+function normalizeFreemiusError(response) {
+  const payload = response?.data || {}
+  const message = getErrorMessage(payload, response.error || `Freemius returned ${response.status || 0}`)
+  const text = String(message || '').toLowerCase()
+  const code = String(payload.code || payload.error?.code || payload.error || '').toLowerCase()
+
+  let status = 'invalid'
+  if (text.includes('expired') || code.includes('expired')) status = 'expired'
+  else if (text.includes('cancel') || code.includes('cancel')) status = 'cancelled'
+  else if (text.includes('refund') || code.includes('refund')) status = 'refunded'
+  else if (text.includes('inactive') || code.includes('inactive')) status = 'inactive'
+  else if (text.includes('deactiv') || code.includes('deactiv')) status = 'deactivated'
+  else if (text.includes('not found') || code.includes('not_found') || response.status === 404) status = 'not_found'
+  else if (response.status === 403) status = 'invalid'
+  else if (!response.status || response.status >= 500) status = 'temporary_error'
+
+  const final = ['expired','cancelled','refunded','inactive','deactivated','not_found','invalid'].includes(status)
+  return {
+    configured: true,
+    valid: false,
+    active: false,
+    success: false,
+    final,
+    provider: 'freemius',
+    status,
+    subscriptionStatus: status,
+    error: message,
+    freemiusStatus: response.status || 0,
+  }
+}
+
+async function activateFreemius({ licenseKey, email, machineId }) {
   if (!FREEMIUS_PRODUCT_ID) {
-    return { configured: false, error: 'Freemius is not configured.' }
+    return { configured: false, final: false, provider: 'freemius', status: 'server_config_error', error: 'Freemius is not configured.' }
   }
 
   const uid = toFreemiusUid(machineId || email || licenseKey)
-
   const endpoint =
     `${FREEMIUS_API_BASE.replace(/\/$/, '')}` +
     `/products/${encodeURIComponent(FREEMIUS_PRODUCT_ID)}` +
-    `/licenses/activate.json` +
-    `?uid=${encodeURIComponent(uid)}` +
-    `&license_key=${encodeURIComponent(licenseKey)}`
+    `/licenses/activate.json`
 
-  const response = await fetch(endpoint, { method: 'POST' })
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      uid,
+      license_key: licenseKey,
+      title: machineId ? `TweakShift AI Engine ${String(machineId).slice(0, 8)}` : 'TweakShift AI Engine',
+      version: '1.0.0',
+      ...(email ? { user_email: email } : {}),
+    }),
+  })
+
   const payload = await response.json().catch(() => ({}))
 
-  if (!response.ok) {
+  if (!response.ok) return normalizeFreemiusError({ status: response.status, data: payload })
+
+  const normalized = normalizeFreemiusPayload(payload, licenseKey, email, uid, { allowTopLevelIdAsInstallId: true })
+  if (!normalized.valid) return makeInactive(normalized.status, normalized.error, 'freemius', normalized)
+  return normalized
+}
+
+async function verifyActiveFreemius({ licenseKey, email, machineId, installId, uid, licenseId }) {
+  if (!FREEMIUS_PRODUCT_ID) {
+    return { configured: false, final: false, provider: 'freemius', status: 'server_config_error', error: 'Freemius is not configured.' }
+  }
+
+  const cleanUid = clean(uid) || toFreemiusUid(machineId || email || licenseKey)
+  const cleanInstallId = clean(installId)
+
+  if (!cleanInstallId) {
     return {
       configured: true,
       valid: false,
-      final: response.status === 403 || response.status === 404,
+      active: false,
+      success: false,
+      final: false,
       provider: 'freemius',
-      status: 'invalid',
-      error: getErrorMessage(payload, `Freemius returned ${response.status}`),
-      freemiusStatus: response.status,
+      status: 'missing_install_id',
+      subscriptionStatus: 'missing_install_id',
+      error: 'Missing Freemius install ID. Ask the user to activate this Freemius license once with the updated build.',
     }
   }
 
-  const normalized = normalizeFreemiusActivation(payload, licenseKey, email, uid)
+  // Verify endpoint only. This does NOT activate and does NOT consume Freemius device quota.
+  const endpoint =
+    `${FREEMIUS_API_BASE.replace(/\/$/, '')}` +
+    `/products/${encodeURIComponent(FREEMIUS_PRODUCT_ID)}` +
+    `/installs/${encodeURIComponent(cleanInstallId)}` +
+    `/license.json` +
+    `?uid=${encodeURIComponent(cleanUid)}` +
+    `&license_key=${encodeURIComponent(licenseKey)}`
 
-  if (!normalized.valid) {
-    return makeInactive(
-      normalized.status,
-      'Freemius license is inactive, expired, cancelled, or not valid for this product.',
-      'freemius',
-      normalized
-    )
-  }
+  const response = await fetch(endpoint, { method: 'GET', headers: { Accept: 'application/json' } })
+  const payload = await response.json().catch(() => ({}))
 
+  if (!response.ok) return normalizeFreemiusError({ status: response.status, data: payload })
+
+  const normalized = normalizeFreemiusPayload(payload, licenseKey, email, cleanUid, {
+    allowTopLevelIdAsInstallId: false,
+    previousInstallId: cleanInstallId,
+    previousLicenseId: licenseId || null,
+  })
+  if (!normalized.valid) return makeInactive(normalized.status, normalized.error, 'freemius', normalized)
   return normalized
+}
+
+async function verifyFreemius({ licenseKey, email, machineId, mode = 'activate', installId = '', uid = '', licenseId = '' }) {
+  if (String(mode || '').toLowerCase() === 'activate') {
+    return activateFreemius({ licenseKey, email, machineId })
+  }
+  return verifyActiveFreemius({ licenseKey, email, machineId, installId, uid, licenseId })
 }
 
 function normalizeGumroadResponse(payload, licenseKey, email, productInfo) {
@@ -404,7 +530,11 @@ app.post('/api/license/verify', async (req, res) => {
     const licenseKey = clean(req.body.licenseKey || req.body.license_key)
     const displayLicenseKey = clean(req.body.displayLicenseKey || licenseKey)
     const email = clean(req.body.email)
-    const machineId = clean(req.body.machineId || req.body.uid)
+    const machineId = clean(req.body.machineId || req.body.deviceId || req.body.uid)
+    const mode = clean(req.body.mode || 'activate').toLowerCase()
+    const installId = clean(req.body.installId || req.body.install_id)
+    const uid = clean(req.body.uid)
+    const licenseId = clean(req.body.licenseId || req.body.license_id)
 
     if (!licenseKey) {
       return res.status(400).json({
@@ -468,6 +598,10 @@ app.post('/api/license/verify', async (req, res) => {
         licenseKey,
         email,
         machineId,
+        mode,
+        installId,
+        uid,
+        licenseId,
       })
 
       attempts.push({
@@ -482,7 +616,7 @@ app.post('/api/license/verify', async (req, res) => {
 
       if (
         freemius.final &&
-        ['cancelled', 'canceled', 'expired', 'inactive'].includes(String(freemius.status || '').toLowerCase())
+        ['cancelled', 'canceled', 'expired', 'inactive', 'disabled', 'deactivated', 'refunded', 'invalid', 'not_found'].includes(String(freemius.status || '').toLowerCase())
       ) {
         return res.status(403).json(freemius)
       }
