@@ -298,7 +298,7 @@ async function deactivateFreemius({ licenseKey, machineId, installId, uid }) {
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
       uid: cleanUid,
-      install_id: cleanInstallId,
+      install_id: /^\d+$/.test(cleanInstallId) ? Number(cleanInstallId) : cleanInstallId,
       license_key: licenseKey,
     }),
   })
@@ -586,6 +586,79 @@ app.get('/health', (_req, res) => {
     },
   })
 })
+
+
+async function handleFreemiusDeactivateRequest(req, res) {
+  try {
+    const licenseKey = clean(req.body.licenseKey || req.body.license_key || req.body.key)
+    const email = clean(req.body.email || req.body.user_email)
+    const machineId = clean(req.body.machineId || req.body.deviceId || req.body.device_id || req.body.uid)
+    const installId = clean(req.body.installId || req.body.install_id)
+    const uid = clean(req.body.uid)
+    const licenseId = clean(req.body.licenseId || req.body.license_id)
+
+    if (!licenseKey) {
+      return res.status(400).json({
+        valid: false,
+        active: false,
+        success: false,
+        provider: 'freemius',
+        status: 'missing_key',
+        error: 'License key is required.',
+      })
+    }
+
+    if (!FREEMIUS_PRODUCT_ID) {
+      return res.status(500).json({
+        valid: false,
+        active: false,
+        success: false,
+        provider: 'freemius',
+        status: 'server_config_error',
+        error: 'Freemius is not configured on the server.',
+      })
+    }
+
+    const freemius = await verifyFreemius({
+      licenseKey,
+      email,
+      machineId,
+      mode: 'deactivate',
+      installId,
+      uid,
+      licenseId,
+    })
+
+    console.log('Freemius deactivate request', {
+      status: freemius.status,
+      success: freemius.success,
+      active: freemius.active,
+      hasInstallId: Boolean(installId),
+      installIdType: /^\d+$/.test(String(installId || '')) ? 'number-like' : 'string/empty',
+      hasUid: Boolean(uid),
+      machineIdLength: machineId.length,
+    })
+
+    if (freemius.success || freemius.status === 'deactivated') {
+      return res.json(freemius)
+    }
+
+    const statusCode = freemius.status === 'missing_install_id' ? 409 : 400
+    return res.status(statusCode).json(freemius)
+  } catch (err) {
+    return res.status(500).json({
+      valid: false,
+      active: false,
+      success: false,
+      transient: true,
+      provider: 'freemius',
+      status: 'server_error',
+      error: err.message || 'Server error during license deactivation.',
+    })
+  }
+}
+
+app.post('/api/license/deactivate', handleFreemiusDeactivateRequest)
 
 app.post('/api/license/verify', async (req, res) => {
   try {
