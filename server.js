@@ -265,6 +265,64 @@ async function activateFreemius({ licenseKey, email, machineId }) {
   return normalized
 }
 
+
+async function deactivateFreemius({ licenseKey, machineId, installId, uid }) {
+  if (!FREEMIUS_PRODUCT_ID) {
+    return { configured: false, final: false, provider: 'freemius', status: 'server_config_error', error: 'Freemius is not configured.' }
+  }
+
+  const cleanUid = clean(uid) || toFreemiusUid(machineId || licenseKey)
+  const cleanInstallId = clean(installId)
+
+  if (!cleanInstallId) {
+    return {
+      configured: true,
+      valid: false,
+      active: false,
+      success: false,
+      final: false,
+      provider: 'freemius',
+      status: 'missing_install_id',
+      subscriptionStatus: 'missing_install_id',
+      error: 'This local license record is missing the Freemius install ID. Activate the license once with this updated build, then deactivate it before reinstalling Windows.',
+    }
+  }
+
+  const endpoint =
+    `${FREEMIUS_API_BASE.replace(/\/$/, '')}` +
+    `/products/${encodeURIComponent(FREEMIUS_PRODUCT_ID)}` +
+    `/licenses/deactivate.json?fields=id%2Cname%2Cslug`
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({
+      uid: cleanUid,
+      install_id: cleanInstallId,
+      license_key: licenseKey,
+    }),
+  })
+
+  const payload = await response.json().catch(() => ({}))
+
+  if (!response.ok) return normalizeFreemiusError({ status: response.status, data: payload })
+
+  return {
+    valid: true,
+    active: false,
+    success: true,
+    final: true,
+    provider: 'freemius',
+    status: 'deactivated',
+    subscriptionStatus: 'deactivated',
+    installId: cleanInstallId,
+    uid: cleanUid,
+    source: 'freemius',
+    message: 'Freemius license deactivated successfully on this PC.',
+    payload,
+  }
+}
+
 async function verifyActiveFreemius({ licenseKey, email, machineId, installId, uid, licenseId }) {
   if (!FREEMIUS_PRODUCT_ID) {
     return { configured: false, final: false, provider: 'freemius', status: 'server_config_error', error: 'Freemius is not configured.' }
@@ -311,8 +369,12 @@ async function verifyActiveFreemius({ licenseKey, email, machineId, installId, u
 }
 
 async function verifyFreemius({ licenseKey, email, machineId, mode = 'activate', installId = '', uid = '', licenseId = '' }) {
-  if (String(mode || '').toLowerCase() === 'activate') {
+  const action = String(mode || '').toLowerCase()
+  if (action === 'activate') {
     return activateFreemius({ licenseKey, email, machineId })
+  }
+  if (action === 'deactivate') {
+    return deactivateFreemius({ licenseKey, machineId, installId, uid })
   }
   return verifyActiveFreemius({ licenseKey, email, machineId, installId, uid, licenseId })
 }
@@ -610,8 +672,12 @@ app.post('/api/license/verify', async (req, res) => {
         error: freemius.error,
       })
 
-      if (freemius.valid) {
+      if (freemius.success || freemius.valid || (mode === 'deactivate' && freemius.status === 'deactivated')) {
         return res.json(freemius)
+      }
+
+      if (mode === 'deactivate' && freemius.status === 'missing_install_id') {
+        return res.status(409).json(freemius)
       }
 
       if (
@@ -661,5 +727,5 @@ app.post('/api/license/verify', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`TweakShift license server running on port ${PORT}`)
-  console.log('License server patch: Gumroad membership+lifetime verification enabled v4')
+  console.log('License server patch: Freemius activation/deactivation + Gumroad verification enabled v5')
 })
