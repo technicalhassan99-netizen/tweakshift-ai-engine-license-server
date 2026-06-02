@@ -607,6 +607,48 @@ app.post('/api/license/verify', async (req, res) => {
       })
     }
 
+
+    // Deactivation must go directly to Freemius.
+    // Do not run Gumroad checks first, because Freemius keys can sometimes look like Gumroad-style keys.
+    // If Gumroad runs first, Freemius can be skipped and the desktop app shows a false internet/deactivation error.
+    if (mode === 'deactivate') {
+      if (!FREEMIUS_PRODUCT_ID) {
+        return res.status(500).json({
+          valid: false,
+          active: false,
+          success: false,
+          provider: 'freemius',
+          status: 'server_config_error',
+          error: 'Freemius is not configured on the server.',
+        })
+      }
+
+      const freemius = await verifyFreemius({
+        licenseKey,
+        email,
+        machineId,
+        mode,
+        installId,
+        uid,
+        licenseId,
+      })
+
+      console.log('Freemius deactivate result', {
+        status: freemius.status,
+        success: freemius.success,
+        active: freemius.active,
+        hasInstallId: Boolean(installId),
+        hasUid: Boolean(uid),
+      })
+
+      if (freemius.success || freemius.status === 'deactivated') {
+        return res.json(freemius)
+      }
+
+      const statusCode = freemius.status === 'missing_install_id' ? 409 : 400
+      return res.status(statusCode).json(freemius)
+    }
+
     const normalizedForGumroad = normalizeGumroadLicenseKey(displayLicenseKey || licenseKey)
     const gumroadCandidates = getGumroadLicenseCandidates(licenseKey, displayLicenseKey)
     const gumroadLike = looksLikeGumroadLicenseKey(displayLicenseKey || licenseKey)
