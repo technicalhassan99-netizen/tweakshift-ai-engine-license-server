@@ -1,10 +1,14 @@
 {
-  "name": "tweakshift-license-server",
-  "version": "1.0.0",
+  "name": "tweakshift-ai-engine-legacy-license-server",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "express": "^4.18.3",

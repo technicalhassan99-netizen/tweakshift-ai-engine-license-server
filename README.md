@@ -1,120 +1,86 @@
-# TweakShift Hybrid License Server
+# TweakShift AI Engine Legacy License Server
 
-Deploy this folder as a Render Web Service.
+This is the legacy fallback license server for older TweakShift AI Engine builds that still use license-key activation.
 
-This server now supports two license providers:
+The new account/login system should use the main auth API instead. Keep this service online during migration so old users do not break.
 
-1. **Gumroad** for new monthly/yearly/lifetime customers.
-2. **Freemius** for existing users so old customers are not affected.
+## Render setup
 
-The desktop app calls this server from:
+Build Command:
 
-```txt
-electron/licenseManager.js
+```bash
+npm install
 ```
 
-Default endpoint:
+Start Command:
 
-```txt
-https://tweakshift-ai-engine-license-server.onrender.com/api/license/verify
+```bash
+npm start
 ```
 
 ## Required environment variables
 
-### Gumroad new users
+Use either the old names or the new AI-specific names.
 
-```txt
-GUMROAD_PRODUCT_ID=your_gumroad_product_id_or_permalink
-<<<<<<< HEAD
-=======
-```
+Required:
 
-The server verifies Gumroad keys through:
-
-```txt
-https://api.gumroad.com/v2/licenses/verify
-```
-
-It checks refunded, disputed, cancelled, failed/unpaid, and ended memberships.
-
-### Freemius existing users
-
-Keep these variables configured so existing Freemius customers keep working:
-
-```txt
+```env
 FREEMIUS_API_BASE=https://api.freemius.com/v1
-FREEMIUS_PRODUCT_ID=your_freemius_product_id
-FREEMIUS_PUBLIC_KEY=your_public_key
-FREEMIUS_SECRET_KEY=your_secret_key
+FREEMIUS_PRODUCT_ID=29310
 ```
 
-The current Freemius flow uses the product license activation endpoint.
+or:
 
-## App-side protection
-
-The desktop app verifies the saved license every time the app opens.
-
-If Render is sleeping or verification times out:
-
-- The app keeps the user’s last verified Premium state temporarily.
-- First retry happens after 30 seconds.
-- Second retry happens after 2 minutes.
-- Premium stays available for up to 72 hours after the last successful verification.
-- After 7 days without successful verification, Premium locks until the server verifies again.
-
-This avoids interrupting real paying users while Render wakes up, but still removes access for expired/refunded/cancelled users when verification succeeds.
-
-
-## Gumroad license key format
-
-Gumroad may display license keys with dashes, for example `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`. The server now tries both the exact dashed key and the compact key when verifying with Gumroad, while keeping Freemius keys unchanged for existing users.
-
-
-## Patch marker
-
-Render logs should show:
-
-```txt
-License server patch: Gumroad raw+dashed verification enabled v3
->>>>>>> c0459be (Fix Gumroad raw and dashed license verification)
-```
-
-The server verifies Gumroad keys through:
-
-```txt
-https://api.gumroad.com/v2/licenses/verify
-```
-
-It checks refunded, disputed, cancelled, failed/unpaid, and ended memberships.
-
-### Freemius existing users
-
-Keep these variables configured so existing Freemius customers keep working:
-
-```txt
+```env
 FREEMIUS_API_BASE=https://api.freemius.com/v1
-FREEMIUS_PRODUCT_ID=your_freemius_product_id
-FREEMIUS_PUBLIC_KEY=your_public_key
-FREEMIUS_SECRET_KEY=your_secret_key
+FREEMIUS_AI_PRODUCT_ID=29310
 ```
 
-The current Freemius flow uses the product license activation endpoint.
+Optional:
 
-## App-side protection
+```env
+APP_SHARED_SECRET=your-secret-here
+ALLOWED_ORIGINS=https://tweakshift.com
+PORT=10000
+```
 
-The desktop app verifies the saved license every time the app opens.
+Important: If you set `APP_SHARED_SECRET`, old desktop builds must send the same secret with `x-app-secret` or `Authorization: Bearer ...`. If old builds do not send it, leave this variable empty for compatibility.
 
-If Render is sleeping or verification times out:
+## Endpoints
 
-- The app keeps the user’s last verified Premium state temporarily.
-- First retry happens after 30 seconds.
-- Second retry happens after 2 minutes.
-- Premium stays available for up to 72 hours after the last successful verification.
-- After 7 days without successful verification, Premium locks until the server verifies again.
+Health:
 
-This avoids interrupting real paying users while Render wakes up, but still removes access for expired/refunded/cancelled users when verification succeeds.
+```http
+GET /health
+```
 
+Legacy activate/verify:
 
-## Gumroad license key format
+```http
+POST /api/license/verify
+Content-Type: application/json
 
-Gumroad may display license keys with dashes, for example `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`. The server normalizes Gumroad keys by removing spaces and dashes before calling Gumroad's verify API, while keeping Freemius keys unchanged for existing users.
+{
+  "licenseKey": "XXXX-XXXX-XXXX-XXXX",
+  "email": "customer@example.com",
+  "machineId": "stable-machine-id"
+}
+```
+
+Legacy deactivate:
+
+```http
+POST /api/license/deactivate
+Content-Type: application/json
+
+{
+  "installId": "123",
+  "installApiToken": "token-from-activation"
+}
+```
+
+## Notes
+
+- `/api/license/verify` activates the license on Freemius because older app builds expect this endpoint to unlock access.
+- Do not use this as the primary account login system.
+- For the new login/account flow, use `tweakshift-auth-api`.
