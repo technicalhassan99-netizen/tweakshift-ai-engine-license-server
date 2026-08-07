@@ -1,5 +1,6 @@
 import express from 'express'
 import cors from 'cors'
+import fs from 'fs'
 
 const app = express()
 const PORT = process.env.PORT || 10000
@@ -313,6 +314,64 @@ app.post('/api/license/deactivate', requireAppSecret, async (req, res) => {
       success: false,
       error: err.message || 'Server error during license deactivation.',
       message: 'Something went wrong while deactivating this device. Please try again.',
+    })
+  }
+})
+
+
+// Public read-only notification feed for the TweakShift desktop app.
+// Content is managed through notifications.json in this GitHub repository.
+app.get('/api/notifications', (_req, res) => {
+  try {
+    const fileUrl = new URL('./notifications.json', import.meta.url)
+    const raw = fs.readFileSync(fileUrl, 'utf8')
+    const parsed = JSON.parse(raw)
+    const source = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.notifications) ? parsed.notifications : []
+    const now = Date.now()
+
+    const notifications = source
+      .filter((item) => item && typeof item === 'object')
+      .filter((item) => item.active !== false)
+      .filter((item) => {
+        if (!item.expiresAt) return true
+        const expiry = new Date(item.expiresAt).getTime()
+        return !Number.isFinite(expiry) || expiry > now
+      })
+      .map((item) => ({
+        id: clean(item.id),
+        title: clean(item.title),
+        message: clean(item.message || item.text),
+        type: clean(item.type || 'info').toLowerCase(),
+        audience: clean(item.audience || 'all').toLowerCase(),
+        priority: clean(item.priority || 'normal').toLowerCase(),
+        createdAt: item.createdAt || null,
+        expiresAt: item.expiresAt || null,
+        ctaLabel: clean(item.ctaLabel),
+        ctaUrl: clean(item.ctaUrl),
+        minVersion: clean(item.minVersion),
+        maxVersion: clean(item.maxVersion),
+      }))
+      .filter((item) => item.id && item.title && item.message)
+      .sort((a, b) => {
+        const priority = { critical: 4, high: 3, normal: 2, low: 1 }
+        const priorityDiff = (priority[b.priority] || 0) - (priority[a.priority] || 0)
+        if (priorityDiff) return priorityDiff
+        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      })
+      .slice(0, 50)
+
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60, stale-while-revalidate=300')
+    return res.json({
+      success: true,
+      notifications,
+      generatedAt: new Date().toISOString(),
+    })
+  } catch (err) {
+    console.error('[notifications] Could not load notification feed:', err)
+    return res.status(500).json({
+      success: false,
+      notifications: [],
+      error: 'Notification feed is temporarily unavailable.',
     })
   }
 })

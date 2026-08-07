@@ -84,3 +84,27 @@ Content-Type: application/json
 - `/api/license/verify` activates the license on Freemius because older app builds expect this endpoint to unlock access.
 - Do not use this as the primary account login system.
 - For the new login/account flow, use `tweakshift-auth-api`.
+
+## Desktop notification feed
+
+This repository now includes a read-only notification feed for TweakShift AI Engine. Notifications are managed in `notifications.json` and exposed at:
+
+`GET /api/notifications`
+
+No new Render environment variable is required for the notification feed. Edit `notifications.json`, commit the change to GitHub, and let Render auto-deploy the service.
+
+Each notification supports:
+
+- `id`: unique stable ID. Never reuse an ID for a different message.
+- `title` / `message`: user-facing copy.
+- `type`: `update`, `info`, `premium`, `warning`, `maintenance`, or `bug`.
+- `audience`: `all`, `free`, or `premium`.
+- `priority`: `low`, `normal`, `high`, or `critical`.
+- `active`: set to `true` to publish.
+- `createdAt`: ISO timestamp used for sorting and relative time.
+- `expiresAt`: optional ISO timestamp; expired messages are automatically hidden.
+- `ctaLabel` / `ctaUrl`: optional HTTPS link shown in the desktop notification.
+- `minVersion` / `maxVersion`: optional app-version targeting.
+
+The sample notifications are intentionally shipped with `active: false` so a test message is not accidentally published to production users.
+

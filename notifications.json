@@ -1,0 +1,34 @@
+{
+  "notifications": [
+    {
+      "id": "example-release-note",
+      "title": "TweakShift update available",
+      "message": "A new TweakShift release is ready with interface, stability, and performance improvements.",
+      "type": "update",
+      "audience": "all",
+      "priority": "normal",
+      "active": false,
+      "createdAt": "2026-08-07T10:00:00Z",
+      "expiresAt": null,
+      "ctaLabel": "Open Updates",
+      "ctaUrl": "https://tweakshift.com/",
+      "minVersion": "",
+      "maxVersion": ""
+    },
+    {
+      "id": "example-free-upgrade",
+      "title": "Unlock the full AI Engine",
+      "message": "Premium unlocks the complete optimization toolkit, Console Mode, Power Plans, and more.",
+      "type": "premium",
+      "audience": "free",
+      "priority": "normal",
+      "active": false,
+      "createdAt": "2026-08-07T10:00:00Z",
+      "expiresAt": null,
+      "ctaLabel": "Upgrade Premium",
+      "ctaUrl": "https://tweakshift.com/tweakshift-ai-engine/",
+      "minVersion": "",
+      "maxVersion": ""
+    }
+  ]
+}
