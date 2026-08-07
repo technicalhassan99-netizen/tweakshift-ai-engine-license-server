@@ -7,7 +7,7 @@
       "type": "update",
       "audience": "all",
       "priority": "normal",
-      "active": false,
+      "active": true,
       "createdAt": "2026-08-07T10:00:00Z",
       "expiresAt": null,
       "ctaLabel": "Open Updates",
