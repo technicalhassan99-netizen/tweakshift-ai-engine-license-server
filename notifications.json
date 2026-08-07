@@ -1,7 +1,7 @@
 {
   "notifications": [
     {
-      "id": "example-release-note",
+      "id": "notification-01",
       "title": "TweakShift update available",
       "message": "A new TweakShift release is ready with interface, stability, and performance improvements.",
       "type": "update",
