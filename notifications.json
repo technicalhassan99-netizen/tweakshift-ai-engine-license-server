@@ -1,17 +1,17 @@
 {
   "notifications": [
     {
-      "id": "notification-01",
-      "title": "TweakShift update available",
-      "message": "A new TweakShift release is ready with interface, stability, and performance improvements.",
+      "id": "notification-02",
+      "title": "Report Bug on Discord",
+      "message": "If you are facing any bug or performance issue so please report it on discord by clicking on the button below",
       "type": "update",
       "audience": "all",
       "priority": "normal",
       "active": true,
       "createdAt": "2026-08-07T10:00:00Z",
       "expiresAt": null,
-      "ctaLabel": "Open Updates",
-      "ctaUrl": "https://tweakshift.com/",
+      "ctaLabel": "Report Bug",
+      "ctaUrl": "https://discord.gg/BDFC8JCMPR ",
       "minVersion": "",
       "maxVersion": ""
     },
