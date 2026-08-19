@@ -1,16 +1,16 @@
 {
   "notifications": [
     {
-      "id": "notification-02",
-      "title": "Report Bug on Discord",
-      "message": "If you are facing any bug or performance issue so please report it on discord by clicking on the button below",
+      "id": "notification-03",
+      "title": "New Update Released - KeyFX Studio",
+      "message": "Hello, TweakShift users we have added a new amazing feature in our tool .. Enjoy and share your experience on our discord server.",
       "type": "update",
       "audience": "all",
       "priority": "normal",
       "active": true,
-      "createdAt": "2026-08-07T10:00:00Z",
+      "createdAt": "2026-08-19T10:00:00Z",
       "expiresAt": null,
-      "ctaLabel": "Report Bug",
+      "ctaLabel": "Let us Know",
       "ctaUrl": "https://discord.gg/BDFC8JCMPR ",
       "minVersion": "",
       "maxVersion": ""
