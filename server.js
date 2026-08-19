@@ -932,6 +932,74 @@ app.post('/api/license/verify', async (req, res) => {
 
 
 // -----------------------------------------------------------------------------
+// TweakShift in-app notifications (GitHub notifications.json -> desktop app)
+// -----------------------------------------------------------------------------
+app.get('/api/notifications', (_req, res) => {
+  try {
+    // notifications.json is committed beside server.js in this Render service.
+    const notificationsFile = new URL('./notifications.json', import.meta.url)
+    const raw = fs.readFileSync(notificationsFile, 'utf8')
+    const parsed = JSON.parse(raw)
+    const now = Date.now()
+    const seenIds = new Set()
+
+    const notifications = (Array.isArray(parsed?.notifications) ? parsed.notifications : [])
+      .filter((item) => item && typeof item === 'object')
+      .filter((item) => item.active !== false)
+      .filter((item) => {
+        if (!item.expiresAt) return true
+        const expiresAt = new Date(item.expiresAt).getTime()
+        return !Number.isFinite(expiresAt) || expiresAt > now
+      })
+      .map((item) => ({
+        id: clean(item.id),
+        title: clean(item.title).slice(0, 120),
+        message: clean(item.message || item.text).slice(0, 500),
+        type: clean(item.type || 'info').toLowerCase(),
+        audience: clean(item.audience || 'all').toLowerCase(),
+        priority: clean(item.priority || 'normal').toLowerCase(),
+        active: item.active !== false,
+        createdAt: item.createdAt || null,
+        expiresAt: item.expiresAt || null,
+        ctaLabel: clean(item.ctaLabel).slice(0, 40),
+        ctaUrl: clean(item.ctaUrl),
+        minVersion: clean(item.minVersion),
+        maxVersion: clean(item.maxVersion),
+      }))
+      .filter((item) => item.id && item.title && item.message)
+      .filter((item) => {
+        if (seenIds.has(item.id)) return false
+        seenIds.add(item.id)
+        return true
+      })
+      .sort((a, b) => {
+        const left = new Date(a.createdAt || 0).getTime()
+        const right = new Date(b.createdAt || 0).getTime()
+        return (Number.isFinite(right) ? right : 0) - (Number.isFinite(left) ? left : 0)
+      })
+      .slice(0, 50)
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+    res.setHeader('Pragma', 'no-cache')
+    res.setHeader('Expires', '0')
+
+    return res.json({
+      success: true,
+      notifications,
+      count: notifications.length,
+      updatedAt: new Date().toISOString(),
+    })
+  } catch (error) {
+    console.error('Notifications API error:', error?.message || error)
+    return res.status(500).json({
+      success: false,
+      notifications: [],
+      error: 'Could not load notifications.json on the server.',
+    })
+  }
+})
+
+// -----------------------------------------------------------------------------
 // Key Sounds private delivery (GitHub App -> TweakShift desktop)
 // -----------------------------------------------------------------------------
 const KEY_SOUNDS_GITHUB_OWNER = process.env.KEY_SOUNDS_GITHUB_OWNER || 'technicalhassan99-netizen'
