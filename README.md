@@ -79,3 +79,29 @@ npm audit
 ```
 
 After Render deploys, confirm that `/health` responds successfully, then verify one real authorized account or license through the desktop application. Local tests without the production provider secrets can verify validation and routing, but cannot complete a real provider entitlement check.
+
+## Anonymous Live Analytics (WordPress dashboard)
+
+TweakShift desktop clients send an anonymous heartbeat to this Render service. The service forwards only the anonymous installation/session IDs, app version, event type, and Free/Premium tier to the private TweakShift WordPress analytics plugin.
+
+Add these Render environment variables after installing the WordPress plugin:
+
+```txt
+TWEAKSHIFT_TELEMETRY_WP_URL=https://tweakshift.com/wp-json/tweakshift/v1/telemetry/heartbeat
+TWEAKSHIFT_TELEMETRY_SECRET=<copy from WordPress > TS Live Analytics>
+```
+
+Optional:
+
+```txt
+TWEAKSHIFT_TELEMETRY_TIMEOUT_MS=7000
+```
+
+Endpoints:
+
+```txt
+GET  /api/telemetry/health
+POST /api/telemetry/heartbeat
+```
+
+The shared telemetry secret must never be committed to GitHub and must never be bundled into the desktop application. It belongs only in Render Environment and the WordPress plugin settings generated on activation.

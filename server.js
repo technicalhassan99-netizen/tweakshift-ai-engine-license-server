@@ -4,6 +4,10 @@ import crypto from 'crypto'
 import fs from 'fs'
 import { Readable } from 'stream'
 
+function cleanEnvUrl(value = '') {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
 const app = express()
 const PORT = process.env.PORT || 10000
 const APP_VERSION = process.env.TWEAKSHIFT_APP_VERSION || '1.2.3'
@@ -21,6 +25,15 @@ const GUMROAD_PRODUCT_ID = process.env.GUMROAD_PRODUCT_ID || process.env.GUMROAD
 
 // Lifetime one-time product
 const GUMROAD_LIFETIME_PRODUCT_ID = process.env.GUMROAD_LIFETIME_PRODUCT_ID || ''
+
+// Anonymous product-usage analytics are forwarded to the private WordPress admin plugin.
+// The shared secret lives only in Render + WordPress; it is never bundled into the desktop app.
+const TELEMETRY_WP_URL = cleanEnvUrl(
+  process.env.TWEAKSHIFT_TELEMETRY_WP_URL ||
+  'https://tweakshift.com/wp-json/tweakshift/v1/telemetry/heartbeat'
+)
+const TELEMETRY_SHARED_SECRET = String(process.env.TWEAKSHIFT_TELEMETRY_SECRET || '').trim()
+const TELEMETRY_TIMEOUT_MS = Math.max(2000, Number(process.env.TWEAKSHIFT_TELEMETRY_TIMEOUT_MS || 7000))
 
 // Optional manual fallback keys for older Payhip/manual distribution.
 // Add comma/newline separated keys in Render env:
@@ -1242,6 +1255,92 @@ async function keySoundsPremiumAllowed(req) {
   }
   return false
 }
+
+
+function validTelemetryId(value) {
+  return /^[a-zA-Z0-9_-]{16,80}$/.test(String(value || ''))
+}
+
+function normalizeTelemetryTier(value) {
+  return String(value || '').trim().toLowerCase() === 'premium' ? 'premium' : 'free'
+}
+
+function normalizeTelemetryEvent(value) {
+  const event = String(value || '').trim().toLowerCase()
+  return ['session_start', 'heartbeat', 'session_end'].includes(event) ? event : 'heartbeat'
+}
+
+app.get('/api/telemetry/health', async (_req, res) => {
+  const configured = Boolean(TELEMETRY_SHARED_SECRET && TELEMETRY_WP_URL)
+  let wordpressReachable = false
+  let wordpressStatus = null
+
+  if (configured) {
+    try {
+      const healthUrl = TELEMETRY_WP_URL.replace(/\/heartbeat\/?$/i, '/health')
+      const response = await upstreamFetch(healthUrl, { headers: { Accept: 'application/json' } }, Math.min(TELEMETRY_TIMEOUT_MS, 5000))
+      wordpressStatus = response.status
+      wordpressReachable = response.ok
+    } catch {}
+  }
+
+  return res.status(configured ? 200 : 503).json({
+    success: configured && wordpressReachable,
+    configured,
+    wordpressReachable,
+    wordpressStatus,
+    service: 'tweakshift-telemetry-bridge',
+  })
+})
+
+app.post('/api/telemetry/heartbeat', async (req, res) => {
+  const installationId = clean(req.body?.installationId).slice(0, 80)
+  const sessionId = clean(req.body?.sessionId).slice(0, 80)
+  const appVersion = clean(req.body?.appVersion).slice(0, 32) || 'unknown'
+  const tier = normalizeTelemetryTier(req.body?.tier)
+  const event = normalizeTelemetryEvent(req.body?.event)
+
+  if (!validTelemetryId(installationId) || !validTelemetryId(sessionId)) {
+    return res.status(400).json({ success: false, code: 'INVALID_TELEMETRY_ID', error: 'Invalid anonymous installation/session identifier.' })
+  }
+
+  if (!TELEMETRY_SHARED_SECRET || !TELEMETRY_WP_URL) {
+    return res.status(503).json({ success: false, code: 'TELEMETRY_NOT_CONFIGURED', error: 'Telemetry storage is not configured.' })
+  }
+
+  const payload = {
+    installationId,
+    sessionId,
+    appVersion,
+    tier,
+    event,
+    receivedAt: new Date().toISOString(),
+  }
+
+  try {
+    const response = await upstreamFetch(TELEMETRY_WP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'X-TweakShift-Telemetry-Secret': TELEMETRY_SHARED_SECRET,
+        'User-Agent': 'TweakShift-Telemetry-Bridge/1.0',
+      },
+      body: JSON.stringify(payload),
+    }, TELEMETRY_TIMEOUT_MS)
+
+    const responseBody = await response.text().catch(() => '')
+    if (!response.ok) {
+      console.warn('[Telemetry] WordPress storage rejected heartbeat:', response.status, responseBody.slice(0, 180))
+      return res.status(502).json({ success: false, code: 'TELEMETRY_STORAGE_UNAVAILABLE', error: 'Telemetry storage is temporarily unavailable.' })
+    }
+
+    return res.json({ success: true, stored: true })
+  } catch (error) {
+    console.warn('[Telemetry] WordPress storage request failed:', error?.name === 'AbortError' ? 'timeout' : (error?.message || error))
+    return res.status(502).json({ success: false, code: 'TELEMETRY_STORAGE_UNAVAILABLE', error: 'Telemetry storage is temporarily unavailable.' })
+  }
+})
 
 app.get('/api/key-sounds/catalog', async (_req, res) => {
   try {
