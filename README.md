@@ -1,110 +1,81 @@
-# TweakShift AI Engine Legacy License Server
+# TweakShift License Server
 
-This is the legacy fallback license server for older TweakShift AI Engine builds that still use license-key activation.
+This folder is the production Render service used by TweakShift AI Engine 1.2.3. It supports the current desktop license-validation contract, legacy Freemius customers, Gumroad customers, notifications, and protected Key Sounds delivery.
 
-The new account/login system should use the main auth API instead. Keep this service online during migration so old users do not break.
+## Render configuration
 
-## Render setup
+- Root directory: repository root
+- Build command: `npm ci`
+- Start command: `npm start`
+- Node.js: 18 or newer
 
-Build Command:
+Keep the existing production environment variables when redeploying. Do not commit API secrets, bearer tokens, or private keys to this repository.
 
-```bash
-npm install
+## License providers
+
+### Gumroad
+
+```txt
+GUMROAD_PRODUCT_ID=your_gumroad_product_id_or_permalink
 ```
 
-Start Command:
+Gumroad keys are checked through Gumroad's license API. The server rejects refunded, disputed, cancelled, failed, unpaid, and ended memberships.
 
-```bash
-npm start
-```
+### Freemius
 
-## Required environment variables
+Keep these values configured so existing Freemius customers continue to work:
 
-Use either the old names or the new AI-specific names.
-
-Required:
-
-```env
+```txt
 FREEMIUS_API_BASE=https://api.freemius.com/v1
-FREEMIUS_PRODUCT_ID=29310
+FREEMIUS_PRODUCT_ID=your_freemius_product_id
+FREEMIUS_PUBLIC_KEY=your_public_key
+FREEMIUS_SECRET_KEY=your_secret_key
 ```
 
-or:
+The desktop app may supply its Freemius installation identity through the protected native-app request headers expected by `server.js`. Do not expose these credentials in browser code or logs.
 
-```env
-FREEMIUS_API_BASE=https://api.freemius.com/v1
-FREEMIUS_AI_PRODUCT_ID=29310
-```
+## HTTP endpoints
 
-Optional:
-
-```env
-APP_SHARED_SECRET=your-secret-here
-ALLOWED_ORIGINS=https://tweakshift.com
-PORT=10000
-```
-
-Important: If you set `APP_SHARED_SECRET`, old desktop builds must send the same secret with `x-app-secret` or `Authorization: Bearer ...`. If old builds do not send it, leave this variable empty for compatibility.
-
-## Endpoints
-
-Health:
-
-```http
-GET /health
-```
-
-Legacy activate/verify:
-
-```http
+```txt
+GET  /health
 POST /api/license/verify
-Content-Type: application/json
-
-{
-  "licenseKey": "XXXX-XXXX-XXXX-XXXX",
-  "email": "customer@example.com",
-  "machineId": "stable-machine-id"
-}
+POST /api/license/validate
+GET  /api/key-sounds/catalog
+GET  /api/key-sounds/download/:packId
+GET  /api/key-sounds/health
 ```
 
-Legacy deactivate:
+`/api/license/validate` performs a non-activating validation for routine startup checks. `/api/license/verify` remains available for activation and compatibility flows.
 
-```http
-POST /api/license/deactivate
-Content-Type: application/json
+## Security and access
 
-{
-  "installId": "123",
-  "installApiToken": "token-from-activation"
-}
+Native desktop requests without an `Origin` header are supported. Browser-origin requests are restricted to the production TweakShift sites by default. Additional trusted origins can be provided through `ALLOWED_ORIGINS` as a comma-separated list.
+
+The service also applies request-size limits, field-length validation, rate limiting, security headers, and upstream request timeouts.
+
+## Key Sounds private GitHub delivery
+
+Recommended environment variables:
+
+```txt
+KEY_SOUNDS_GITHUB_APP_ID=4640897
+KEY_SOUNDS_GITHUB_CLIENT_ID=Iv23liOrgT4gqDMIUYwQ
+KEY_SOUNDS_GITHUB_OWNER=technicalhassan99-netizen
+KEY_SOUNDS_GITHUB_REPO=TweakShift-KeySounds-Private
+KEY_SOUNDS_RELEASE_TAG=keysounds-v1.0.0
+KEY_SOUNDS_GITHUB_PRIVATE_KEY_PATH=/etc/secrets/tweakshift-sound-delivery.pem
 ```
 
-## Notes
+In Render Dashboard, add a secret file named `tweakshift-sound-delivery.pem` and paste the GitHub App private-key PEM into that secret file. Never commit the PEM or bundle it into the desktop app.
 
-- `/api/license/verify` activates the license on Freemius because older app builds expect this endpoint to unlock access.
-- Do not use this as the primary account login system.
-- For the new login/account flow, use `tweakshift-auth-api`.
+## Verification
 
-## Desktop notification feed
+Before deploying:
 
-This repository now includes a read-only notification feed for TweakShift AI Engine. Notifications are managed in `notifications.json` and exposed at:
+```bash
+npm ci
+npm run check
+npm audit
+```
 
-`GET /api/notifications`
-
-No new Render environment variable is required for the notification feed. Edit `notifications.json`, commit the change to GitHub, and let Render auto-deploy the service.
-
-Each notification supports:
-
-- `id`: unique stable ID. Never reuse an ID for a different message.
-- `title` / `message`: user-facing copy.
-- `type`: `update`, `info`, `premium`, `warning`, `maintenance`, or `bug`.
-- `audience`: `all`, `free`, or `premium`.
-- `priority`: `low`, `normal`, `high`, or `critical`.
-- `active`: set to `true` to publish.
-- `createdAt`: ISO timestamp used for sorting and relative time.
-- `expiresAt`: optional ISO timestamp; expired messages are automatically hidden.
-- `ctaLabel` / `ctaUrl`: optional HTTPS link shown in the desktop notification.
-- `minVersion` / `maxVersion`: optional app-version targeting.
-
-The sample notifications are intentionally shipped with `active: false` so a test message is not accidentally published to production users.
-
+After Render deploys, confirm that `/health` responds successfully, then verify one real authorized account or license through the desktop application. Local tests without the production provider secrets can verify validation and routing, but cannot complete a real provider entitlement check.

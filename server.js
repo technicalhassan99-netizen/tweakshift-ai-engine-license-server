@@ -6,6 +6,10 @@ import { Readable } from 'stream'
 
 const app = express()
 const PORT = process.env.PORT || 10000
+const APP_VERSION = process.env.TWEAKSHIFT_APP_VERSION || '1.2.3'
+const UPSTREAM_TIMEOUT_MS = Math.max(3000, Number(process.env.UPSTREAM_TIMEOUT_MS || 15000))
+const RATE_WINDOW_MS = 60 * 1000
+const RATE_MAX = Math.max(10, Number(process.env.RATE_LIMIT_PER_MINUTE || 90))
 
 const FREEMIUS_API_BASE = process.env.FREEMIUS_API_BASE || 'https://api.freemius.com/v1'
 const FREEMIUS_PRODUCT_ID = process.env.FREEMIUS_PRODUCT_ID || process.env.FREEMIUS_AI_PRODUCT_ID || ''
@@ -25,8 +29,62 @@ const GUMROAD_LIFETIME_PRODUCT_ID = process.env.GUMROAD_LIFETIME_PRODUCT_ID || '
 const PAYHIP_LICENSE_KEYS = process.env.PAYHIP_LICENSE_KEYS || ''
 const LEGACY_LICENSE_KEYS = process.env.LEGACY_LICENSE_KEYS || ''
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST'] }))
+const configuredOrigins = String(process.env.ALLOWED_ORIGINS || 'https://tweakshift.com,https://www.tweakshift.com')
+  .split(',').map((value) => value.trim()).filter(Boolean)
+app.disable('x-powered-by')
+app.set('trust proxy', 1)
+app.use(cors({
+  origin(origin, callback) {
+    // Native desktop requests do not carry Origin. Browser callers are allowlisted.
+    if (!origin || configuredOrigins.includes(origin)) return callback(null, true)
+    return callback(null, false)
+  },
+  methods: ['GET', 'POST'],
+  allowedHeaders: [
+    'Authorization', 'Content-Type', 'Cache-Control',
+    'X-TweakShift-Account-Token', 'X-TweakShift-Session-Token',
+    'X-TweakShift-License-Key', 'X-TweakShift-Display-License-Key', 'X-TweakShift-Email',
+    'X-TweakShift-Machine-Id', 'X-TweakShift-Device-Name', 'X-TweakShift-Platform', 'X-TweakShift-Arch',
+    'X-TweakShift-Install-Id', 'X-TweakShift-License-Id', 'X-TweakShift-Freemius-Uid', 'X-TweakShift-Install-Api-Token',
+  ],
+}))
 app.use(express.json({ limit: '64kb' }))
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  res.setHeader('Cache-Control', 'no-store')
+  next()
+})
+
+const rateBuckets = new Map()
+app.use('/api', (req, res, next) => {
+  const now = Date.now()
+  const key = String(req.ip || req.socket?.remoteAddress || 'unknown')
+  let bucket = rateBuckets.get(key)
+  if (!bucket || now - bucket.startedAt >= RATE_WINDOW_MS) bucket = { startedAt: now, count: 0 }
+  bucket.count += 1
+  rateBuckets.set(key, bucket)
+  if (bucket.count > RATE_MAX) {
+    res.setHeader('Retry-After', String(Math.ceil((RATE_WINDOW_MS - (now - bucket.startedAt)) / 1000)))
+    return res.status(429).json({ success: false, code: 'RATE_LIMITED', error: 'Too many requests. Please wait a moment and try again.' })
+  }
+  next()
+})
+setInterval(() => {
+  const cutoff = Date.now() - RATE_WINDOW_MS * 2
+  for (const [key, bucket] of rateBuckets) if (bucket.startedAt < cutoff) rateBuckets.delete(key)
+}, RATE_WINDOW_MS).unref?.()
+
+async function upstreamFetch(url, options = {}, timeoutMs = UPSTREAM_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 function clean(value) {
   return String(value || '').trim()
@@ -304,14 +362,14 @@ async function activateFreemius({ licenseKey, email, machineId }) {
     `/products/${encodeURIComponent(FREEMIUS_PRODUCT_ID)}` +
     `/licenses/activate.json`
 
-  const response = await fetch(endpoint, {
+  const response = await upstreamFetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
       uid,
       license_key: licenseKey,
       title: machineId ? `TweakShift AI Engine ${String(machineId).slice(0, 8)}` : 'TweakShift AI Engine',
-      version: '1.0.0',
+      version: APP_VERSION,
       ...(email ? { user_email: email } : {}),
     }),
   })
@@ -366,7 +424,7 @@ async function deactivateFreemius({ licenseKey, machineId, installId, uid, insta
   let lastError = null
 
   for (const endpoint of endpoints) {
-    const response = await fetch(endpoint, {
+    const response = await upstreamFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(body),
@@ -441,7 +499,7 @@ async function verifyActiveFreemius({ licenseKey, email, machineId, installId, u
     `?uid=${encodeURIComponent(cleanUid)}` +
     `&license_key=${encodeURIComponent(licenseKey)}`
 
-  const response = await fetch(endpoint, { method: 'GET', headers: { Accept: 'application/json' } })
+  const response = await upstreamFetch(endpoint, { method: 'GET', headers: { Accept: 'application/json' } })
   const payload = await response.json().catch(() => ({}))
 
   if (!response.ok) return normalizeFreemiusError({ status: response.status, data: payload })
@@ -554,7 +612,7 @@ async function verifyGumroadCandidate(candidate, productInfo) {
   body.set('license_key', candidate)
   body.set('increment_uses_count', 'false')
 
-  const response = await fetch(`${GUMROAD_API_BASE.replace(/\/$/, '')}/licenses/verify`, {
+  const response = await upstreamFetch(`${GUMROAD_API_BASE.replace(/\/$/, '')}/licenses/verify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
@@ -748,7 +806,28 @@ async function handleFreemiusDeactivateRequest(req, res) {
   }
 }
 
+function validateLicenseRequest(req, res, next) {
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}
+  const licenseKey = clean(body.licenseKey || body.license_key || body.key)
+  const machineId = clean(body.machineId || body.deviceId || body.device_id || body.uid)
+  const email = clean(body.email || body.user_email)
+  if (licenseKey.length > 256 || machineId.length > 256 || email.length > 320) {
+    return res.status(400).json({ success: false, valid: false, active: false, code: 'INVALID_REQUEST', error: 'License request fields are invalid.' })
+  }
+  req.body = body
+  next()
+}
+
+app.use(['/api/license/verify', '/api/license/validate', '/api/license/deactivate'], validateLicenseRequest)
 app.post('/api/license/deactivate', handleFreemiusDeactivateRequest)
+
+// Validation is deliberately non-activating so app restarts never consume another
+// Freemius device slot. Keep this contract separate from manual activation.
+app.post('/api/license/validate', (req, res, next) => {
+  req.body = { ...(req.body || {}), mode: 'verify' }
+  req.url = '/api/license/verify'
+  next()
+})
 
 app.post('/api/license/verify', async (req, res) => {
   try {
@@ -932,74 +1011,6 @@ app.post('/api/license/verify', async (req, res) => {
 
 
 // -----------------------------------------------------------------------------
-// TweakShift in-app notifications (GitHub notifications.json -> desktop app)
-// -----------------------------------------------------------------------------
-app.get('/api/notifications', (_req, res) => {
-  try {
-    // notifications.json is committed beside server.js in this Render service.
-    const notificationsFile = new URL('./notifications.json', import.meta.url)
-    const raw = fs.readFileSync(notificationsFile, 'utf8')
-    const parsed = JSON.parse(raw)
-    const now = Date.now()
-    const seenIds = new Set()
-
-    const notifications = (Array.isArray(parsed?.notifications) ? parsed.notifications : [])
-      .filter((item) => item && typeof item === 'object')
-      .filter((item) => item.active !== false)
-      .filter((item) => {
-        if (!item.expiresAt) return true
-        const expiresAt = new Date(item.expiresAt).getTime()
-        return !Number.isFinite(expiresAt) || expiresAt > now
-      })
-      .map((item) => ({
-        id: clean(item.id),
-        title: clean(item.title).slice(0, 120),
-        message: clean(item.message || item.text).slice(0, 500),
-        type: clean(item.type || 'info').toLowerCase(),
-        audience: clean(item.audience || 'all').toLowerCase(),
-        priority: clean(item.priority || 'normal').toLowerCase(),
-        active: item.active !== false,
-        createdAt: item.createdAt || null,
-        expiresAt: item.expiresAt || null,
-        ctaLabel: clean(item.ctaLabel).slice(0, 40),
-        ctaUrl: clean(item.ctaUrl),
-        minVersion: clean(item.minVersion),
-        maxVersion: clean(item.maxVersion),
-      }))
-      .filter((item) => item.id && item.title && item.message)
-      .filter((item) => {
-        if (seenIds.has(item.id)) return false
-        seenIds.add(item.id)
-        return true
-      })
-      .sort((a, b) => {
-        const left = new Date(a.createdAt || 0).getTime()
-        const right = new Date(b.createdAt || 0).getTime()
-        return (Number.isFinite(right) ? right : 0) - (Number.isFinite(left) ? left : 0)
-      })
-      .slice(0, 50)
-
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
-    res.setHeader('Pragma', 'no-cache')
-    res.setHeader('Expires', '0')
-
-    return res.json({
-      success: true,
-      notifications,
-      count: notifications.length,
-      updatedAt: new Date().toISOString(),
-    })
-  } catch (error) {
-    console.error('Notifications API error:', error?.message || error)
-    return res.status(500).json({
-      success: false,
-      notifications: [],
-      error: 'Could not load notifications.json on the server.',
-    })
-  }
-})
-
-// -----------------------------------------------------------------------------
 // Key Sounds private delivery (GitHub App -> TweakShift desktop)
 // -----------------------------------------------------------------------------
 const KEY_SOUNDS_GITHUB_OWNER = process.env.KEY_SOUNDS_GITHUB_OWNER || 'technicalhassan99-netizen'
@@ -1048,7 +1059,7 @@ function createGitHubAppJwt() {
 }
 
 async function githubJson(pathname, { method = 'GET', token = '', body = null, jwt = false } = {}) {
-  const response = await fetch(`https://api.github.com${pathname}`, {
+  const response = await upstreamFetch(`https://api.github.com${pathname}`, {
     method,
     headers: {
       Accept: 'application/vnd.github+json',
@@ -1163,7 +1174,7 @@ async function verifyKeySoundsAccountRequest(req) {
   const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : clean(req.headers['x-tweakshift-account-token'])
   if (!token) return false
 
-  const response = await fetch(`${TWEAKSHIFT_AUTH_API_BASE.replace(/\/$/, '')}/api/tool/verify-access`, {
+  const response = await upstreamFetch(`${TWEAKSHIFT_AUTH_API_BASE.replace(/\/$/, '')}/api/tool/verify-access`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -1197,6 +1208,10 @@ async function verifyKeySoundsLicenseRequest(req) {
   const displayLicenseKey = clean(req.headers['x-tweakshift-display-license-key'] || licenseKey)
   const email = clean(req.headers['x-tweakshift-email'])
   const machineId = clean(req.headers['x-tweakshift-machine-id'])
+  const installId = clean(req.headers['x-tweakshift-install-id'])
+  const licenseId = clean(req.headers['x-tweakshift-license-id'])
+  const uid = clean(req.headers['x-tweakshift-freemius-uid'])
+  const installApiToken = clean(req.headers['x-tweakshift-install-api-token'])
   if (!licenseKey) return false
 
   const manual = verifyManualLicenseKey({ licenseKey, displayLicenseKey, email })
@@ -1208,7 +1223,7 @@ async function verifyKeySoundsLicenseRequest(req) {
   }
 
   if (FREEMIUS_PRODUCT_ID) {
-    const freemius = await verifyFreemius({ licenseKey, email, machineId, mode: 'verify' })
+    const freemius = await verifyFreemius({ licenseKey, email, machineId, mode: 'verify', installId, licenseId, uid, installApiToken })
     if (freemius.success || freemius.valid) return true
   }
   return false
@@ -1266,7 +1281,7 @@ app.get('/api/key-sounds/download/:packId', async (req, res) => {
     if (!asset) return res.status(404).json({ success: false, code: 'ASSET_NOT_FOUND', error: 'The selected sound pack is not attached to the configured release.' })
 
     const token = await getKeySoundsInstallationToken()
-    const upstream = await fetch(
+    const upstream = await upstreamFetch(
       `https://api.github.com/repos/${encodeURIComponent(KEY_SOUNDS_GITHUB_OWNER)}/${encodeURIComponent(KEY_SOUNDS_GITHUB_REPO)}/releases/assets/${asset.id}`,
       {
         headers: {
